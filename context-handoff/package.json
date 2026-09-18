@@ -1,0 +1,23 @@
+{
+  "name": "dsh-context-handoff",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "DSH plugin: when available context drops below a threshold, open a new session in the same workspace and continue there with a digest of the previous session.",
+  "keywords": ["dsh", "dsh-plugin", "context", "handoff", "session", "compaction"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/mock.test.mjs"
+  }
+}

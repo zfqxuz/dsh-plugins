@@ -1,0 +1,29 @@
+# dsh-ecs-n8n-gh — DSH profile bundle patch.
+#
+# Installed through the official plugin path:
+#   dsh plugin --profile web add /path/to/dsh-plugins/ecs-n8n-gh
+#
+# This bundle ships neutral placeholder config. Override the row from the
+# profile's own cordis.patch.yml (the user layer wins per row), for example:
+#
+#   - id: ecs-n8n-gh
+#     config:
+#       ecsHost: 203.0.113.10
+#       ecsUser: root
+#       sshKey: /home/me/.ssh/id_ed25519
+#       workspace: /srv/touhou-trpg
+#       ghRepo: owner/repo
+- insert:
+    - id: ecs-n8n-gh
+      name: dsh-ecs-n8n-gh
+      config:
+        ecsHost: ''
+        ecsUser: root
+        ecsPort: 22
+        sshKey: ''
+        deployDir: /opt/touhou-trpg
+        composeFile: docker-compose.prod.yml
+        n8nContainer: touhou-trpg-n8n
+        workspace: ''
+        ghRepo: ''
+        maxOutput: 30000

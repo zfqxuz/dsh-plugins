@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "name": "dsh-plugins",
+  "description": "Discoverable DSH (DeepSeek Harness) plugins: installable as profile bundles or as home-level local plugins.",
+  "homepage": "https://github.com/zfqxuz/dsh-plugins",
+  "updatedAt": "2026-09-18",
+  "install": {
+    "list": "./install.sh list",
+    "homeLevel": "DSH_HOME=~/.dsh ./install.sh <id>",
+    "bundle": "dsh plugin --profile web add <repo>/<dir>",
+    "bundleFromGit": "dsh plugin --profile web add github:zfqxuz/dsh-plugins#path:/<dir>"
+  },
+  "plugins": [
+    {
+      "id": "context-handoff",
+      "package": "dsh-context-handoff",
+      "dir": "context-handoff",
+      "version": "1.0.0",
+      "description": "当可用上下文不足 30% 时，在当前工作区新开会话并携带上一会话的 recall 摘要继续。",
+      "descriptionEn": "When available context drops below 30%, open a new session in the same workspace and continue there with a recall digest of the previous session.",
+      "tags": ["context", "handoff", "session", "compaction", "workspace"],
+      "entry": "context-handoff/index.js",
+      "mount": {
+        "id": "context-handoff",
+        "name": "./plugins/dsh-context-handoff/index.js"
+      },
+      "defaultConfig": {
+        "availableRatio": 0.3,
+        "autoContinue": true,
+        "continueMode": "fresh",
+        "digestMaxChars": 12000
+      },
+      "tools": ["context_handoff"],
+      "commands": ["handoff"],
+      "test": "node context-handoff/test/mock.test.mjs"
+    },
+    {
+      "id": "session-reader",
+      "package": "dsh-session-reader",
+      "dir": "session-reader",
+      "version": "1.0.0",
+      "description": "通过 session_id 读取另一个会话的完整转录（支持多帧 Zstandard 日志），注册 session_read 工具。",
+      "descriptionEn": "Read another conversation transcript by session id (multi-frame Zstandard logs); registers the session_read tool.",
+      "tags": ["session", "transcript", "recall", "zstd"],
+      "entry": "session-reader/index.js",
+      "mount": {
+        "id": "session-reader",
+        "name": "./plugins/dsh-session-reader/index.js"
+      },
+      "defaultConfig": {},
+      "tools": ["session_read"],
+      "commands": [],
+      "test": null
+    },
+    {
+      "id": "ecs-n8n-gh",
+      "package": "dsh-ecs-n8n-gh",
+      "dir": "ecs-n8n-gh",
+      "version": "1.0.0",
+      "description": "把 ECS SSH、n8n 工作流部署、GitHub Actions 查询注册为模型工具。",
+      "descriptionEn": "Common ECS SSH, n8n workflow, and GitHub Actions operations as model-facing tools.",
+      "tags": ["ecs", "ssh", "n8n", "github-actions", "deploy"],
+      "entry": "ecs-n8n-gh/index.js",
+      "mount": {
+        "id": "ecs-n8n-gh",
+        "name": "./plugins/dsh-ecs-n8n-gh/index.js"
+      },
+      "defaultConfig": {
+        "ecsHost": "",
+        "ecsUser": "root",
+        "ecsPort": 22,
+        "sshKey": "",
+        "deployDir": "/opt/touhou-trpg",
+        "composeFile": "docker-compose.prod.yml",
+        "n8nContainer": "touhou-trpg-n8n",
+        "workspace": "",
+        "ghRepo": "",
+        "maxOutput": 30000
+      },
+      "tools": ["ecs_exec", "ecs_status", "ecs_upload", "n8n_status", "n8n_deploy_workflow", "gh_run_list", "gh_run_view"],
+      "commands": [],
+      "test": null
+    }
+  ]
+}

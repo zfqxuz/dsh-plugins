@@ -1,0 +1,17 @@
+# dsh-context-handoff — DSH profile bundle patch.
+#
+# Installed through the official plugin path:
+#   dsh plugin --profile web add /path/to/dsh-plugins/context-handoff
+#   dsh plugin --profile web add github:zfqxuz/dsh-plugins#path:/context-handoff
+#
+# The row name is the installed package name, resolved by the profile's
+# node_modules. Adjust `config:` to change the trigger or digest budget.
+- insert:
+    - id: context-handoff
+      name: dsh-context-handoff
+      config:
+        # Trigger when available/contextWindow < 30% (i.e. used > 70%).
+        availableRatio: 0.3
+        autoContinue: true
+        continueMode: fresh
+        digestMaxChars: 12000

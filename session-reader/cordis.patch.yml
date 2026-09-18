@@ -1,0 +1,10 @@
+# dsh-session-reader — DSH profile bundle patch.
+#
+# Installed through the official plugin path:
+#   dsh plugin --profile web add /path/to/dsh-plugins/session-reader
+#
+# The tool locates sessions below $DSH_HOME/sessions by default. Set
+# config.sessionsRoot to read a different home's logs.
+- insert:
+    - id: session-reader
+      name: dsh-session-reader

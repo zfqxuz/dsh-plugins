@@ -1,0 +1,20 @@
+{
+  "name": "dsh-ecs-n8n-gh",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "DSH plugin: common ECS SSH, n8n workflow, and GitHub Actions operations.",
+  "keywords": ["dsh", "dsh-plugin", "ecs", "ssh", "n8n", "github-actions"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

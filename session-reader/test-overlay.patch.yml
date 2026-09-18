@@ -1,0 +1,6 @@
+# Temporary test overlay that mounts the local session-reader plugin.
+- insert:
+    - id: session-reader
+      name: /home/zfq/runGroup/dsh-plugins/session-reader/index.js
+      config:
+        sessionsRoot: /home/zfq/.dsh/sessions

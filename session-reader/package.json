@@ -1,0 +1,20 @@
+{
+  "name": "dsh-session-reader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "DSH plugin: read another conversation transcript by session id.",
+  "keywords": ["dsh", "dsh-plugin", "session", "transcript", "zstd"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

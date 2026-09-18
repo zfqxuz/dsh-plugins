@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+/tmp/
+*.tmp
+# Local-only verification artifacts / conversation transcripts (private content).
+session-reader/verification/
+*.transcript.txt
