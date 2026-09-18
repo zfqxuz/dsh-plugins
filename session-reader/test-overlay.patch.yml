@@ -1,6 +1,5 @@
-# Temporary test overlay that mounts the local session-reader plugin.
+# Example source-mount overlay. run-headless-test.sh generates an absolute-path
+# version automatically; this file is kept as a minimal reference.
 - insert:
     - id: session-reader
-      name: /home/zfq/runGroup/dsh-plugins/session-reader/index.js
-      config:
-        sessionsRoot: /home/zfq/.dsh/sessions
+      name: ./index.js
