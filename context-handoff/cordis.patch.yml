@@ -10,8 +10,11 @@
     - id: context-handoff
       name: dsh-context-handoff
       config:
-        # Trigger when available/contextWindow < 30% (i.e. used > 70%).
-        availableRatio: 0.3
+        # Trigger when available/contextWindow < 50% (i.e. used >= 50%).
+        availableRatio: 0.5
         autoContinue: true
         continueMode: fresh
         digestMaxChars: 12000
+        # Freeze the source session and auto-switch the Web UI (client half).
+        freezeParent: true
+        freezeTools: true

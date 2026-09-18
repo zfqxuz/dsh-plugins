@@ -15,9 +15,9 @@
       "id": "context-handoff",
       "package": "dsh-context-handoff",
       "dir": "context-handoff",
-      "version": "1.0.0",
-      "description": "当可用上下文不足 30% 时，在当前工作区新开会话并携带上一会话的 recall 摘要继续。",
-      "descriptionEn": "When available context drops below 30%, open a new session in the same workspace and continue there with a recall digest of the previous session.",
+      "version": "1.1.0",
+      "description": "当可用上下文不足 50% 时，在当前工作区新开会话并携带上一会话的 recall 摘要继续。",
+      "descriptionEn": "When available context drops below 50%, open a new session in the same workspace and continue there with a recall digest of the previous session.",
       "tags": ["context", "handoff", "session", "compaction", "workspace"],
       "entry": "context-handoff/index.js",
       "mount": {
@@ -25,7 +25,7 @@
         "name": "./plugins/dsh-context-handoff/index.js"
       },
       "defaultConfig": {
-        "availableRatio": 0.3,
+        "availableRatio": 0.5,
         "autoContinue": true,
         "continueMode": "fresh",
         "digestMaxChars": 12000

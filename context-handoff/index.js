@@ -2,7 +2,7 @@
  * DSH plugin: automatic context-pressure handoff.
  *
  * When a live session's AVAILABLE context drops below a configured ratio
- * (default 30%), this plugin opens a NEW session in the SAME workspace, feeds
+ * (default 50%), this plugin opens a NEW session in the SAME workspace, feeds
  * it a compact "recall" digest of the previous session plus a pointer to the
  * full transcript, and (by default) starts the continuation turn there.
  *
@@ -35,8 +35,8 @@ export const inject = ['tools']
 
 /** Default configuration; every value is overridable through the patch `config:` block. */
 const DEFAULTS = Object.freeze({
-  /** Trigger when available/contextWindow drops below this ratio. 0.3 == 30% available. */
-  availableRatio: 0.3,
+  /** Trigger when available/contextWindow drops below this ratio. 0.5 == 50% available (used >= 50%). */
+  availableRatio: 0.5,
   /** Optional context-window fallback used when the session records none. */
   contextWindow: 0,
   /** Never trigger before this many tokens are in use. */
@@ -57,6 +57,10 @@ const DEFAULTS = Object.freeze({
   digestIncludeToolCalls: true,
   /** Inject a durable notice into the parent so its model knows about the handoff. */
   notifyParent: true,
+  /** After handoff, freeze the source session: a hard scoped prompt + no new work there. */
+  freezeParent: true,
+  /** Also hide and deny tools in the frozen source session (strongest freeze). */
+  freezeTools: true,
   /** Only one automatic handoff per source session. */
   once: true,
   /** Include child sessions that are themselves subagents. */
@@ -96,6 +100,21 @@ function safeGet(ctx, serviceName) {
   }
 }
 
+/**
+ * Resolve a service through an agent-scoped context, preferring the direct
+ * property form the subagent drivers use (`agent.ctx.tools.restrict(...)`) so
+ * scoped registrations are always bound to that agent.
+ */
+function scopedGet(ctx, serviceName) {
+  try {
+    const direct = ctx?.[serviceName]
+    if (direct !== undefined) return direct
+  } catch {
+    /* fall through to the reflective form */
+  }
+  return safeGet(ctx, serviceName)
+}
+
 function clampNumber(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
@@ -122,7 +141,7 @@ function normalizeConfig(raw) {
   if (cfg.continueMode !== 'fresh' && cfg.continueMode !== 'seed') {
     throw new Error(`${PLUGIN_LABEL}: continueMode must be 'fresh' or 'seed'`)
   }
-  for (const key of ['autoContinue', 'digestIncludeToolCalls', 'notifyParent', 'once', 'includeSubagents', 'dryRun']) {
+  for (const key of ['autoContinue', 'digestIncludeToolCalls', 'notifyParent', 'freezeParent', 'freezeTools', 'once', 'includeSubagents', 'dryRun']) {
     cfg[key] = cfg[key] === true
   }
   cfg.toolName = typeof cfg.toolName === 'string' && cfg.toolName.trim() !== '' ? cfg.toolName.trim() : DEFAULTS.toolName
@@ -483,12 +502,11 @@ function pathExists(path) {
 }
 
 function buildParentNotice(childId, occ, cfg) {
-  const summary = `上下文已交接：新会话 ${childId} 继续`
+  const summary = `已交接给 ${childId}，本会话已冻结`
   return makeUserMessage(
     [
-      `[context-handoff] 本会话可用上下文已低于 ${formatPct(cfg.availableRatio)}（约剩 ${formatPct(occ.availableRatio)}）。`,
-      `已自动在当前工作区创建接续会话 \`${childId}\`，并在其中继续任务。`,
-      '如果用户仍在本会话发言，请简短处理，并提醒用户后续请在新的接续会话中进行，以免重复上下文。',
+      `[context-handoff] 本会话可用上下文已低于 ${formatPct(cfg.availableRatio)}（约剩 ${formatPct(occ.availableRatio)}），已交接给接续会话 \`${childId}\`，当前会话已冻结。`,
+      `后续工作请到该会话继续。**不要**再调用工具、不要再继续任务、不要向用户提问；如果用户在此发言，只回复一行：「已交接给 ${childId}，请打开该会话继续。」`,
     ].join('\n'),
     { kind: 'plugin', plugin: name, form: 'notice', summary: summary.length <= 120 ? summary : `${summary.slice(0, 119)}…` }
   )
@@ -502,6 +520,10 @@ function createState() {
   return {
     handled: new Set(),
     inflight: new Map(),
+    /** parent session id -> handoff entry (one active continuation per parent). */
+    children: new Map(),
+    /** Disposers for the frozen-parent prompt context / tool restriction / guard. */
+    freezeDisposers: [],
     lastTriggerAt: 0,
     triggers: [],
     skipped: [],
@@ -511,6 +533,77 @@ function createState() {
 function record(state, bucket, entry) {
   state[bucket].push(entry)
   if (state[bucket].length > 50) state[bucket].splice(0, state[bucket].length - 50)
+}
+
+/**
+ * Freeze the source session after a handoff so it cannot keep doing the task.
+ *
+ * Two independent layers, both registered through the parent agent's own scoped
+ * context so they cannot leak to other agents:
+ *   1. a hard system-prompt context that forbids work and asks for a one-line
+ *      pointer;
+ *   2. an optional tool restriction (hide global tools) plus a monotonic guard
+ *      (deny every tool execution in this session, scoped registrations included).
+ *
+ * @returns a small record for logging/tool output.
+ */
+function freezeParent(ctx, parent, childId, cfg, state) {
+  const parentId = parent?.session?.header?.id ?? parent?.session?.id ?? parent?.id
+  const info = {
+    parentSessionId: parentId,
+    childSessionId: childId,
+    enabled: cfg.freezeParent === true,
+    prompt: false,
+    toolsRestricted: false,
+    toolsGuarded: false,
+  }
+  if (cfg.freezeParent !== true) return info
+
+  const promptText = [
+    '[context-handoff] THIS SESSION IS FROZEN AND HAS BEEN HANDED OFF.',
+    `All further work continues in the new session \`${childId}\` (same workspace).`,
+    'Do not perform work here. Do not call tools. Do not ask the user questions.',
+    `If the user sends a message in this session, reply with exactly one short line:"已交接给 ${childId}，请打开该会话继续。"`,
+  ].join(' ')
+
+  const systemPrompt = scopedGet(parent.ctx, 'systemPrompt')
+  if (systemPrompt !== undefined && typeof systemPrompt.context === 'function') {
+    try {
+      const dispose = systemPrompt.context({ name: `${PLUGIN_LABEL}:frozen`, order: 9999, text: promptText })
+      if (typeof dispose === 'function') state.freezeDisposers.push(dispose)
+      info.prompt = true
+    } catch (error) {
+      safeLog(ctx, 'warn', `${PLUGIN_LABEL}: could not register frozen prompt context: ${String(error?.message ?? error)}`)
+    }
+  }
+
+  if (cfg.freezeTools === true) {
+    const tools = scopedGet(parent.ctx, 'tools')
+    if (tools !== undefined && typeof tools.restrict === 'function') {
+      try {
+        const dispose = tools.restrict({ allow: [] })
+        if (typeof dispose === 'function') state.freezeDisposers.push(dispose)
+        info.toolsRestricted = true
+      } catch (error) {
+        safeLog(ctx, 'warn', `${PLUGIN_LABEL}: could not restrict tools on frozen session: ${String(error?.message ?? error)}`)
+      }
+    }
+    if (tools !== undefined && typeof tools.guard === 'function') {
+      try {
+        const dispose = tools.guard((exec) => {
+          const execAgent = exec?.agent?.id
+          return execAgent === parentId
+            ? `${PLUGIN_LABEL}: session ${parentId} was handed off to ${childId}; tools are disabled here`
+            : undefined
+        })
+        if (typeof dispose === 'function') state.freezeDisposers.push(dispose)
+        info.toolsGuarded = true
+      } catch (error) {
+        safeLog(ctx, 'warn', `${PLUGIN_LABEL}: could not guard tools on frozen session: ${String(error?.message ?? error)}`)
+      }
+    }
+  }
+  return info
 }
 
 async function performHandoff(ctx, session, occ, cfg, state, reason) {
@@ -572,6 +665,8 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
     }
   }
 
+  const freeze = freezeParent(ctx, parent, childId, cfg, state)
+
   const entry = {
     at: Date.now(),
     reason,
@@ -585,7 +680,9 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
     autoContinue: cfg.autoContinue && started,
     presetId,
     method: cfg.continueMode,
+    freeze,
   }
+  state.children.set(session.id, entry)
   record(state, 'triggers', entry)
   safeLog(
     ctx,
@@ -600,10 +697,16 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
  * for expected conditions so tool/command callers can render it.
  */
 async function maybeHandoff(ctx, session, cfg, state, options = {}) {
-  const { force = false, reason = 'auto' } = options
+  const { force = false, recreate = false, reason = 'auto' } = options
   const occ = readOccupancy(ctx, session, cfg)
   if (occ === undefined) {
     return { ok: false, code: 'unavailable', occ, message: 'context occupancy is unavailable: no contextPressure projection, tokenMeter, or contextWindow' }
+  }
+  // One active continuation per source session: a forced `handoff` reuses it
+  // instead of creating duplicate child sessions. Pass recreate=true for a new one.
+  const existing = recreate ? undefined : state.children.get(session.id)
+  if (existing !== undefined) {
+    return { ok: true, code: 'reused', occ, entry: existing, message: `session ${session.id} already has continuation ${existing.childSessionId}` }
   }
   if (!force && !shouldTrigger(occ, cfg)) {
     return { ok: false, code: 'below-threshold', occ, message: `available ${formatPct(occ.availableRatio)} >= threshold ${formatPct(cfg.availableRatio)}` }
@@ -690,6 +793,7 @@ function statusText(session, occ, cfg, state) {
     `- trigger_threshold: available < ${formatPct(cfg.availableRatio)}`,
     `- would_trigger: ${shouldTrigger(occ, cfg) ? 'yes' : 'no'}`,
     `- already_handled: ${state.handled.has(session.id) ? 'yes' : 'no'}`,
+    `- continuation: ${state.children.get(session.id)?.childSessionId ?? '(none)'}`,
     `- inflight: ${state.inflight.has(session.id) ? 'yes' : 'no'}`,
     `- auto_continue: ${cfg.autoContinue ? 'yes' : 'no'}`,
     `- continue_mode: ${cfg.continueMode}`,
@@ -701,8 +805,8 @@ function statusText(session, occ, cfg, state) {
 function okText(result) {
   if (result.ok) {
     const e = result.entry
-    return [
-      `handoff ok`,
+    const lines = [
+      result.code === 'reused' ? 'handoff ok (reused existing continuation)' : 'handoff ok',
       `- from: ${e.parentSessionId}`,
       `- to: ${e.childSessionId}`,
       `- workspace: ${e.workspaceId ?? '(none)'}`,
@@ -710,7 +814,12 @@ function okText(result) {
       `- auto_continue: ${e.autoContinue ? 'yes' : 'no'}`,
       `- digest_chars: ${e.digestChars}`,
       `- method: ${e.method}`,
-    ].join('\n')
+    ]
+    if (result.code === 'reused') lines.push('- reused: yes')
+    if (e.freeze !== undefined) {
+      lines.push(`- frozen: prompt=${e.freeze.prompt ? 'yes' : 'no'} tools_restricted=${e.freeze.toolsRestricted ? 'yes' : 'no'} tools_guarded=${e.freeze.toolsGuarded ? 'yes' : 'no'}`)
+    }
+    return lines.join('\n')
   }
   const occ = result.occ
   const suffix = occ === undefined ? '' : ` (available ${formatPct(occ.availableRatio)})`
@@ -731,7 +840,9 @@ export function apply(ctx, config = {}) {
     if (session === undefined || typeof session.id !== 'string') return
     if (!cfg.includeSubagents) {
       const header = session.header ?? {}
-      if (header.origin === 'subagent' || (header.parentSession !== undefined && header.delegationDepth !== undefined)) return
+      // Ordinary continuation sessions also carry parentSession (and a
+      // delegationDepth of 0), so only a real subagent origin/depth is skipped.
+      if (header.origin === 'subagent' || (typeof header.delegationDepth === 'number' && header.delegationDepth > 0)) return
     }
     void Promise.resolve()
       .then(async () => {
@@ -761,6 +872,19 @@ export function apply(ctx, config = {}) {
     ctx.on('session/event', onBoundary)
   }
 
+  // Lift every frozen-parent registration when the plugin unloads.
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => () => {
+      for (const dispose of state.freezeDisposers.splice(0)) {
+        try {
+          dispose()
+        } catch {
+          /* cleanup must never throw */
+        }
+      }
+    }, `${PLUGIN_LABEL}: frozen-parent cleanup`)
+  }
+
   const tool = {
     name: cfg.toolName,
     description:
@@ -774,6 +898,10 @@ export function apply(ctx, config = {}) {
           type: 'string',
           enum: ['status', 'check', 'handoff', 'list'],
           description: "Default 'status'.",
+        },
+        new_session: {
+          type: 'boolean',
+          description: 'For action=handoff only: create a brand-new continuation even when one already exists. Default false reuses the existing continuation.',
         },
       },
     },
@@ -792,7 +920,7 @@ export function apply(ctx, config = {}) {
         return [`recent handoffs (${triggers.length}):`, ...triggers, `recent skips (${skipped.length}):`, ...skipped].join('\n')
       }
       if (action === 'check') return okText(await maybeHandoff(ctx, session, cfg, state, { reason: 'tool:check' }))
-      if (action === 'handoff') return okText(await maybeHandoff(ctx, session, cfg, state, { force: true, reason: 'tool:force' }))
+      if (action === 'handoff') return okText(await maybeHandoff(ctx, session, cfg, state, { force: true, recreate: args?.new_session === true, reason: 'tool:force' }))
       throw new Error(`${PLUGIN_LABEL}: unknown action ${JSON.stringify(action)}`)
     },
   }
@@ -831,6 +959,7 @@ export const internals = Object.freeze({
   createState,
   maybeHandoff,
   performHandoff,
+  freezeParent,
   buildDigest,
   balancedTurnPrefix,
   resolveLogPath,

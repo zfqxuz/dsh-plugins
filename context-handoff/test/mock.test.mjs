@@ -28,7 +28,7 @@ function makeSession(overrides = {}) {
 }
 
 function makeCtx({ pressure, session }) {
-  const seen = { created: [], followups: [], injected: [], attached: [], tools: [], commands: [], on: [], logs: [] }
+  const seen = { created: [], followups: [], injected: [], attached: [], tools: [], commands: [], on: [], logs: [], freeze: { prompt: [], restrict: [], guard: [] } }
   const stateOf = (s, key) => {
     if (key === 'contextPressure') return pressure
     if (key === 'title') return '实现登录'
@@ -48,7 +48,21 @@ function makeCtx({ pressure, session }) {
     status: 'idle',
     inbox: { hasPending: false },
     options: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'high' },
-    ctx: { fake: 'parent-scope' },
+    ctx: {
+      get(name) {
+        if (name === 'systemPrompt') {
+          return { context: (entry) => { seen.freeze.prompt.push(entry); return () => {} } }
+        }
+        if (name === 'tools') {
+          return {
+            restrict: (filter) => { seen.freeze.restrict.push(filter); return () => {} },
+            guard: (guard) => { seen.freeze.guard.push(guard); return () => {} },
+          }
+        }
+        return undefined
+      },
+      fake: 'parent-scope',
+    },
     followup: () => {},
     inject: (message) => seen.injected.push(message),
   }
@@ -129,6 +143,10 @@ await test('triggers below the configured available ratio', async () => {
   assert.equal(seen.injected[0].source.form, 'notice')
   assert.equal(seen.tools.length, 1, 'tool registered')
   assert.equal(seen.commands.length, 1, 'command registered')
+  assert.equal(seen.freeze.prompt.length, 1, 'frozen prompt context registered')
+  assert.equal(seen.freeze.restrict.length, 1, 'frozen tool restriction registered')
+  assert.equal(seen.freeze.guard.length, 1, 'frozen tool guard registered')
+  assert.match(seen.injected[0].content[0].text, /冻结/)
 })
 
 await test('does not trigger while plenty of context remains', async () => {
@@ -206,7 +224,7 @@ await test('config validation', () => {
   assert.throws(() => normalizeConfig({ checkOn: 'nope' }))
   assert.throws(() => normalizeConfig({ continueMode: 'nope' }))
   const cfg = normalizeConfig({ availableRatio: '0.5' })
-  assert.equal(cfg.availableRatio, 0.3, 'non-numeric keeps default')
+  assert.equal(cfg.availableRatio, 0.5, 'non-numeric keeps default')
 })
 
 await test('occupancy prefers tokenMeter when no projection', () => {
@@ -216,6 +234,46 @@ await test('occupancy prefers tokenMeter when no projection', () => {
   assert.equal(occ.used, 800)
   assert.equal(occ.contextWindow, 1000000)
   assert.equal(occ.source, 'tokenMeter')
+})
+
+await test('forced handoff reuses an existing continuation instead of duplicating', async () => {
+  const session = makeSession()
+  const { ctx, seen, parent } = makeCtx({ pressure: { contextWindow: 1000, pressureTokens: 750, surfaceTokens: 750, sampledSurfaceTokens: 750 }, session })
+  apply(ctx, { availableRatio: 0.3, cooldownMs: 0 })
+  const tool = seen.tools[0]
+  const first = String(await tool.execute({ action: 'handoff' }, { agent: parent }))
+  const second = String(await tool.execute({ action: 'handoff' }, { agent: parent }))
+  assert.match(first, /handoff ok/)
+  assert.match(second, /reused existing continuation/)
+  assert.equal(seen.created.length, 1, 'only one child created')
+})
+
+await test('forced handoff with new_session=true creates a fresh continuation', async () => {
+  const session = makeSession()
+  const { ctx, seen, parent } = makeCtx({ pressure: { contextWindow: 1000, pressureTokens: 750, surfaceTokens: 750, sampledSurfaceTokens: 750 }, session })
+  apply(ctx, { availableRatio: 0.3, cooldownMs: 0 })
+  const tool = seen.tools[0]
+  await tool.execute({ action: 'handoff' }, { agent: parent })
+  await tool.execute({ action: 'handoff', new_session: true }, { agent: parent })
+  assert.equal(seen.created.length, 2, 'explicit new_session creates a second child')
+})
+
+await test('freeze can be disabled by config', async () => {
+  const session = makeSession()
+  const { ctx, seen, parent } = makeCtx({ pressure: { contextWindow: 1000, pressureTokens: 750, surfaceTokens: 750, sampledSurfaceTokens: 750 }, session })
+  apply(ctx, { availableRatio: 0.3, cooldownMs: 0, freezeParent: false })
+  await seen.tools[0].execute({ action: 'handoff' }, { agent: parent })
+  assert.equal(seen.freeze.prompt.length, 0)
+  assert.equal(seen.freeze.restrict.length, 0)
+})
+
+await test('status reports the existing continuation', async () => {
+  const session = makeSession()
+  const { ctx, seen, parent } = makeCtx({ pressure: { contextWindow: 1000, pressureTokens: 750, surfaceTokens: 750, sampledSurfaceTokens: 750 }, session })
+  apply(ctx, { availableRatio: 0.3, cooldownMs: 0 })
+  await seen.tools[0].execute({ action: 'handoff' }, { agent: parent })
+  const status = String(await seen.tools[0].execute({ action: 'status' }, { agent: parent }))
+  assert.match(status, /continuation: session-/)
 })
 
 console.log(failures === 0 ? '\nall tests passed' : `\n${failures} test(s) failed`)

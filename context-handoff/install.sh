@@ -12,7 +12,7 @@ PATCH="$DSH_HOME/cordis.patch.yml"
 MARK_BEGIN="# >>> dsh-plugins: $PLUGIN_ID >>>"
 MARK_END="# <<< dsh-plugins: $PLUGIN_ID <<<"
 
-for f in index.js package.json cordis.patch.yml; do
+for f in index.js client.js package.json cordis.patch.yml; do
   if [ ! -f "$SRC_DIR/$f" ]; then
     echo "install: missing $SRC_DIR/$f" >&2
     exit 2
@@ -21,6 +21,7 @@ done
 
 mkdir -p "$DEST" "$DSH_HOME"
 install -m 0644 "$SRC_DIR/index.js" "$DEST/index.js"
+install -m 0644 "$SRC_DIR/client.js" "$DEST/client.js"
 install -m 0644 "$SRC_DIR/package.json" "$DEST/package.json"
 install -m 0644 "$SRC_DIR/cordis.patch.yml" "$DEST/cordis.patch.yml"
 [ -f "$SRC_DIR/README.md" ] && install -m 0644 "$SRC_DIR/README.md" "$DEST/README.md"
@@ -54,7 +55,7 @@ $MARK_BEGIN
     - id: $PLUGIN_ID
       name: ./plugins/$DIR_NAME/index.js
       config:
-        availableRatio: 0.3
+        availableRatio: 0.5
         autoContinue: true
         continueMode: fresh
         digestMaxChars: 12000

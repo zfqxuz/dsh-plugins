@@ -1,23 +1,36 @@
 {
   "name": "dsh-context-handoff",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "main": "index.js",
-  "description": "DSH plugin: when available context drops below a threshold, open a new session in the same workspace and continue there with a digest of the previous session.",
-  "keywords": ["dsh", "dsh-plugin", "context", "handoff", "session", "compaction"],
+  "description": "DSH plugin: when available context drops below a threshold, open a new session in the same workspace, continue there with a digest of the previous session, freeze the old one, and auto-switch the Web UI to it.",
+  "keywords": ["dsh", "dsh-plugin", "context", "handoff", "session", "compaction", "client"],
   "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
     }
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
-    "test": "node test/mock.test.mjs"
+    "test": "node test/mock.test.mjs && node test/client.test.mjs"
   }
 }

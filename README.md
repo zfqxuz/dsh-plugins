@@ -11,7 +11,7 @@
 
 | 插件 | 包名 | 作用 |
 |---|---|---|
-| [context-handoff](./context-handoff/README.md) | `dsh-context-handoff` | 可用上下文不足 30% 时，在当前工作区新开会话，并把上一会话的 `recall` 摘要与完整日志指针交给新会话继续 |
+| [context-handoff](./context-handoff/README.md) | `dsh-context-handoff` | 可用上下文不足 50% 时，在当前工作区新开会话，并把上一会话的 `recall` 摘要与完整日志指针交给新会话继续 |
 | [session-reader](./session-reader/README.md) | `dsh-session-reader` | 通过 `session_id` 读取另一个会话的完整转录（多帧 Zstandard），注册 `session_read` 工具 |
 | [ecs-n8n-gh](./ecs-n8n-gh/README.md) | `dsh-ecs-n8n-gh` | ECS SSH、n8n 工作流部署、GitHub Actions 查询，注册 `ecs_*` / `n8n_*` / `gh_*` 工具 |
 
@@ -64,7 +64,7 @@ ECS_HOST=203.0.113.10 ECS_SSH_KEY=~/.ssh/id_ed25519 GH_REPO=me/repo \
 4. 修改前把旧 patch 备份为 `cordis.patch.yml.bak.<timestamp>`；
 5. `ecs-n8n-gh` 会从旧 patch 中保留已有的 `ecsHost` / `sshKey` / `ghRepo` 等值，除非显式传环境变量覆盖。
 
-`dsh web` 的 `patchReload: live` 会在下一次配置扫描时加载；否则重启 web 进程。
+`dsh web` 的 `patchReload: live` 会在下一次配置扫描时加载 host 半；**client 半（自动切换 UI）需要重启 `dsh web`**，因为 `dsh-client-modules` 会缓存 package 的 `dsh.client` 判定直到进程结束。
 
 > `~/.dsh` 在 `workspace-write` 沙箱下默认不可写。请在普通终端运行安装脚本，或以 `danger-full-access` 权限运行。
 
@@ -82,7 +82,7 @@ ECS_HOST=203.0.113.10 ECS_SSH_KEY=~/.ssh/id_ed25519 GH_REPO=me/repo \
       "dir": "context-handoff",
       "entry": "context-handoff/index.js",
       "mount": { "id": "context-handoff", "name": "./plugins/dsh-context-handoff/index.js" },
-      "defaultConfig": { "availableRatio": 0.3 },
+      "defaultConfig": { "availableRatio": 0.5 },
       "tools": ["context_handoff"],
       "commands": ["handoff"]
     }
@@ -109,18 +109,22 @@ curl -fsSL https://raw.githubusercontent.com/zfqxuz/dsh-plugins/main/registry.js
 ## 验证
 
 ```bash
-# context-handoff 逻辑单测（11 项，无需 DSH/网络）
+# context-handoff host 逻辑单测（15 项，无需 DSH/网络）
 node context-handoff/test/mock.test.mjs
+
+# context-handoff client（自动切换）逻辑单测（5 项）
+node context-handoff/test/client.test.mjs
 
 # 可选的真实 headless DSH 集成测试（会调用模型，消耗额度）
 context-handoff/test/run-headless-test.sh /tmp/dsh-handoff-verify
 ```
 
-真实 headless 集成测试已在 `dsh 0.1.5-rc.1` / `deepseek-flash` 上跑通：
+已在 `dsh 0.1.5-rc.1` / `deepseek-flash` 上真实验证：
 
 - 工具 `context_handoff(action=handoff)` 成功创建子会话；
 - 子会话 `agent/inbox/spliced` 中出现 `source: { kind: "plugin", plugin: "context-handoff", form: "recall" }` 的摘要消息；
-- `turn/end` 自动触发路径同样成功，子会话继承父会话 `cwd`，`parentSession` 指向父会话。
+- `turn/end` 自动触发路径同样成功，子会话继承父会话 `cwd`，`parentSession` 指向父会话，并自动跑完一个接续 turn；
+- `dsh-client-modules` 把 `dsh-context-handoff/client.js` 编入 `window.__DSH_BOOT__`；Playwright Chromium 加载无错误，`window.__dshContextHandoff.applied === true`。
 
 ## 仓库结构
 
