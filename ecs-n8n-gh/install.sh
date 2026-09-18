@@ -24,6 +24,28 @@ DSH_PROJECT_ROOT="${DSH_PROJECT_ROOT:-}"
 GH_REPO="${GH_REPO:-}"
 N8N_CONTAINER="${N8N_CONTAINER:-touhou-trpg-n8n}"
 
+# Preserve values from a previous (possibly unmarked) install when the caller
+# did not provide an override. This keeps a re-run from wiping a real ECS host
+# or key path out of cordis.patch.yml.
+preserve() {
+  local key="$1" current="$2" found
+  if [ -n "$current" ]; then printf '%s' "$current"; return; fi
+  if [ -f "$PATCH" ]; then
+    found="$(grep -m1 -E "^[[:space:]]*$key:[[:space:]]*" "$PATCH" 2>/dev/null \
+      | sed -E "s/^[^:]+:[[:space:]]*//; s/[[:space:]]*$//; s/^['\"]//; s/['\"]$//" || true)"
+    if [ -n "$found" ]; then printf '%s' "$found"; return; fi
+  fi
+  printf '%s' "$current"
+}
+ECS_HOST="$(preserve ecsHost "$ECS_HOST")"
+ECS_USER="$(preserve ecsUser "$ECS_USER")"
+ECS_PORT="$(preserve ecsPort "$ECS_PORT")"
+ECS_SSH_KEY="$(preserve sshKey "$ECS_SSH_KEY")"
+DEPLOY_DIR="$(preserve deployDir "$DEPLOY_DIR")"
+DSH_PROJECT_ROOT="$(preserve workspace "$DSH_PROJECT_ROOT")"
+GH_REPO="$(preserve ghRepo "$GH_REPO")"
+N8N_CONTAINER="$(preserve n8nContainer "$N8N_CONTAINER")"
+
 for f in index.js package.json; do
   if [ ! -f "$SRC_DIR/$f" ]; then
     echo "install: missing $SRC_DIR/$f" >&2
@@ -38,6 +60,14 @@ install -m 0644 "$SRC_DIR/package.json" "$DEST/package.json"
 [ -f "$SRC_DIR/README.md" ] && install -m 0644 "$SRC_DIR/README.md" "$DEST/README.md"
 
 if [ -f "$PATCH" ]; then
+  cp -f "$PATCH" "$PATCH.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+fi
+
+PATCH_TOOL="$SRC_DIR/../tools/patch-blocks.mjs"
+if [ -f "$PATCH_TOOL" ] && command -v node >/dev/null 2>&1; then
+  # Removes the managed marker block AND any legacy unmarked insert for this id.
+  node "$PATCH_TOOL" remove "$PATCH" "$PLUGIN_ID" || true
+elif [ -f "$PATCH" ]; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
     $0 == b { skip = 1; next }
     $0 == e { skip = 0; next }

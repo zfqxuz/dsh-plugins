@@ -59,7 +59,10 @@ ECS_HOST=203.0.113.10 ECS_SSH_KEY=~/.ssh/id_ed25519 GH_REPO=me/repo \
 安装脚本会：
 
 1. 把插件复制到 `$DSH_HOME/plugins/<package>/`；
-2. 在 `$DSH_HOME/cordis.patch.yml` 写入带 marker 的 `insert` 块（幂等，重复执行不会重复挂载）。
+2. 在 `$DSH_HOME/cordis.patch.yml` 写入带 marker 的 `insert` 块；
+3. 先移除同一 `id` 的旧 block（包括没有 marker 的手工安装遗留项），因此重复执行不会产生重复挂载；
+4. 修改前把旧 patch 备份为 `cordis.patch.yml.bak.<timestamp>`；
+5. `ecs-n8n-gh` 会从旧 patch 中保留已有的 `ecsHost` / `sshKey` / `ghRepo` 等值，除非显式传环境变量覆盖。
 
 `dsh web` 的 `patchReload: live` 会在下一次配置扫描时加载；否则重启 web 进程。
 

@@ -26,6 +26,14 @@ install -m 0644 "$SRC_DIR/package.json" "$DEST/package.json"
 [ -f "$SRC_DIR/README.md" ] && install -m 0644 "$SRC_DIR/README.md" "$DEST/README.md"
 
 if [ -f "$PATCH" ]; then
+  cp -f "$PATCH" "$PATCH.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+fi
+
+PATCH_TOOL="$SRC_DIR/../tools/patch-blocks.mjs"
+if [ -f "$PATCH_TOOL" ] && command -v node >/dev/null 2>&1; then
+  # Removes the managed marker block AND any legacy unmarked insert for this id.
+  node "$PATCH_TOOL" remove "$PATCH" "$PLUGIN_ID" || true
+elif [ -f "$PATCH" ]; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
     $0 == b { skip = 1; next }
     $0 == e { skip = 0; next }
