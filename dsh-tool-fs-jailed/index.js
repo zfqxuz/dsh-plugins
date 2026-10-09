@@ -70,7 +70,8 @@ function expandHome(value) {
   return value
 }
 
-function createJail(displayRoot) {
+/** One allowed root: resolved directory + display name + optional address prefix. */
+function createRoot(displayRoot, prefix = '') {
   let root
   let available = true
   try {
@@ -79,37 +80,90 @@ function createJail(displayRoot) {
     root = undefined
     available = false
   }
+  return { prefix, displayRoot, get root() { return root }, get available() { return available } }
+}
+
+/**
+ * Build a path guard bound to one **primary** root plus optional **extra** roots.
+ *
+ * Why extra roots: a read-only session may need its own directory *and* a shared
+ * read-only area. Two roots must not be flattened into one (that would let a
+ * relative name silently retarget), so extra roots are addressed by an explicit
+ * `<prefix>/…` segment (`shared/群规.md`), and the absolute-path form is accepted
+ * for any allowed root. Errors never echo a resolved absolute path.
+ *
+ * @param displayRoot primary root as configured (used to brand error messages)
+ * @param extraRoots  `[{ prefix, root }]` — prefix '' entries are ignored
+ */
+function createJail(displayRoot, extraRoots = []) {
+  const primary = createRoot(displayRoot)
+  const extras = []
+  for (const item of Array.isArray(extraRoots) ? extraRoots : []) {
+    const prefix = String(item?.prefix ?? '').trim().replace(/\/+$/, '')
+    const path = String(item?.root ?? '').trim()
+    if (prefix === '' || path === '') continue
+    if (extras.some((entry) => entry.prefix === prefix)) continue
+    extras.push(createRoot(path, prefix))
+  }
+  const all = [primary, ...extras]
 
   const fail = (requested, reason) => {
     // Never echo the resolved absolute path: the guest must not learn it.
     throw new Error(`cannot read "${requested}": ${reason}`)
   }
 
-  return {
-    get root() { return root },
-    get available() { return available },
-    get displayRoot() { return displayRoot },
+  /** `shared/x` → `{ entry, rest: 'x' }`; no prefix match → null. */
+  const matchPrefix = (raw) => {
+    for (const entry of extras) {
+      if (raw === entry.prefix || raw === `${entry.prefix}/`) return { entry, rest: '.' }
+      if (raw.startsWith(`${entry.prefix}/`)) return { entry, rest: raw.slice(entry.prefix.length + 1) }
+    }
+    return null
+  }
 
-    /** Resolve a model-supplied path, rejecting anything outside the root. */
+  /** Resolve one path inside one root; returns `{ real, display, root, entry }`. */
+  const resolveIn = (entry, rest, requested) => {
+    if (!entry.available) fail(requested, 'the allowed root is not available on this host')
+    const abs = isAbsolute(rest) ? resolve(rest) : resolve(entry.root, rest)
+    let real
+    try {
+      real = realCandidate(abs)
+    } catch (error) {
+      fail(requested, error?.code === 'ENOENT' ? 'not found' : (error?.message ?? 'cannot be resolved'))
+    }
+    let owner = entry
+    if (!insideRoot(entry.root, real)) {
+      // 绝对路径可能落在另一个允许的根里；带前缀的写法**不允许**改投别的根（否则前缀就形同虚设）。
+      owner = entry.prefix === '' ? all.find((candidate) => candidate.available && insideRoot(candidate.root, real)) : undefined
+    }
+    if (!owner) fail(requested, 'outside the allowed root')
+    const rel = relative(owner.root, real)
+    const inside = rel === '' ? '.' : rel.split(sep).join('/')
+    const display = owner.prefix === '' ? inside : (inside === '.' ? owner.prefix : `${owner.prefix}/${inside}`)
+    return { real, display, root: owner.root, entry: owner }
+  }
+
+  return {
+    get root() { return primary.root },
+    get available() { return primary.available },
+    get displayRoot() { return primary.displayRoot },
+    get extras() { return extras },
+    get roots() { return all },
+
+    /** Resolve a model-supplied path, rejecting anything outside the allowed roots. */
     resolve(requested) {
       if (typeof requested !== 'string' || requested.trim() === '') fail(requested, 'file_path must be a non-empty string')
-      if (!available) fail(requested, 'the allowed root is not available on this host')
       const raw = requested.trim()
-      const abs = isAbsolute(raw) ? resolve(raw) : resolve(root, raw)
-      let real
-      try {
-        real = realCandidate(abs)
-      } catch (error) {
-        fail(raw, error?.code === 'ENOENT' ? 'not found' : (error?.message ?? 'cannot be resolved'))
-      }
-      if (!insideRoot(root, real)) fail(raw, 'outside the allowed root')
-      const display = relative(root, real) === '' ? '.' : relative(root, real)
-      return { real, display: display.split(sep).join('/') }
+      const prefixed = matchPrefix(raw)
+      if (prefixed) return resolveIn(prefixed.entry, prefixed.rest, raw)
+      return resolveIn(primary, raw, raw)
     },
 
-    /** Resolve a directory argument that defaults to the root. */
+    /** Resolve a directory argument that defaults to the primary root. */
     resolveDir(requested) {
-      if (requested === undefined) return { real: root, display: '.' }
+      if (requested === undefined) {
+        return { real: primary.root, display: '.', root: primary.root, entry: primary }
+      }
       return this.resolve(requested)
     },
   }
@@ -167,7 +221,7 @@ function matchGlob(pattern, relativePath) {
  * Walk a directory tree without ever leaving the jail: symlinked directories
  * are resolved and skipped when they point outside.
  */
-function walk(jail, startReal, limits, onFile) {
+function walk(rootEntry, startReal, limits, onFile) {
   const queue = [startReal]
   let visited = 0
   while (queue.length > 0) {
@@ -185,7 +239,7 @@ function walk(jail, startReal, limits, onFile) {
         if (SKIP_DIRS.has(entry.name)) continue
         let real
         try { real = realpathSync(abs) } catch { continue }
-        if (!insideRoot(jail.root, real)) continue
+        if (!insideRoot(rootEntry.root, real)) continue
         queue.push(real)
         continue
       }
@@ -195,7 +249,7 @@ function walk(jail, startReal, limits, onFile) {
         if (!stat.isFile()) continue
         let real
         try { real = realpathSync(abs) } catch { continue }
-        if (!insideRoot(jail.root, real)) continue
+        if (!insideRoot(rootEntry.root, real)) continue
         visited += 1
         if (onFile(abs, real) === false) return { truncated: false, stopped: true }
         continue
@@ -225,16 +279,37 @@ export function apply(ctx, config = {}) {
   const limits = { ...DEFAULTS, ...Object.fromEntries(
     Object.entries(config).filter(([key]) => key in DEFAULTS && typeof config[key] === 'number'),
   ) }
-  const jail = createJail(configuredRoot ?? '')
+  const jail = createJail(configuredRoot ?? '', config.extraRoots)
   if (!jail.available) {
     ctx.logger?.warn?.(`[tool-fs-jailed] allowed root unavailable: ${displayRoot} — all reads will be refused`)
+  }
+  for (const extra of jail.extras) {
+    if (!extra.available) {
+      ctx.logger?.warn?.(`[tool-fs-jailed] extra root unavailable: ${extra.prefix}/ -> ${extra.displayRoot} — that area stays unreachable`)
+    }
+  }
+
+  const extras = jail.extras
+  const scopeText = extras.length === 0
+    ? `the allowed directory (${displayRoot})`
+    : `the allowed directories (${displayRoot}`
+      + extras.map((entry) => `, and "${entry.prefix}/" which maps to ${entry.displayRoot}`).join('') + ')'
+  const prefixNote = extras.length === 0
+    ? ''
+    : ` A path may start with ${extras.map((entry) => `"${entry.prefix}/"`).join(' or ')} to reach ${extras.length > 1 ? 'those areas' : 'that area'}.`
+  /** Display path for a hit, keeping the addressing prefix so the model can reuse it. */
+  const displayRel = (base, real) => {
+    const rel = relative(base.root, real).split(sep).join('/')
+    const prefix = base.entry?.prefix ?? ''
+    if (prefix === '') return rel
+    return rel === '' || rel === '.' ? prefix : `${prefix}/${rel}`
   }
 
   ctx.tools.register({
     name: 'read',
     description:
-      `Read a UTF-8 text file with line numbers. Read-only and confined to the allowed directory (${displayRoot}); ` +
-      'paths outside it are refused. Arguments: file_path (required, absolute or relative to the allowed directory); ' +
+      `Read a UTF-8 text file with line numbers. Read-only and confined to ${scopeText}; ` +
+      `paths outside are refused.${prefixNote} Arguments: file_path (required, absolute or relative to the allowed directory); ` +
       'offset (optional, 1-based first line); limit (optional, max lines).',
     parameters: {
       type: 'object',
@@ -308,9 +383,9 @@ export function apply(ctx, config = {}) {
   ctx.tools.register({
     name: 'glob',
     description:
-      `Find files whose paths match a glob pattern. Read-only and confined to the allowed directory (${displayRoot}). ` +
-      'A pattern with no "/" matches basenames at any depth; "**" matches across directories. ' +
-      'Results are paths relative to the allowed directory, most recently modified first.',
+      `Find files whose paths match a glob pattern. Read-only and confined to ${scopeText}. ` +
+      `A pattern with no "/" matches basenames at any depth; "**" matches across directories.${prefixNote} ` +
+      'Results are display paths (with their prefix), most recently modified first.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -331,8 +406,8 @@ export function apply(ctx, config = {}) {
       if (!info.isDirectory()) throw new Error(`cannot read "${args.path ?? '.'}": not a directory`)
 
       const hits = []
-      walk(jail, base.real, limits, (abs, real) => {
-        const rel = relative(jail.root, real).split(sep).join('/')
+      walk(base.entry, base.real, limits, (abs, real) => {
+        const rel = displayRel(base, real)
         if (!matchGlob(pattern, rel)) return true
         let stat
         try { stat = statSync(real) } catch { return true }
@@ -354,8 +429,8 @@ export function apply(ctx, config = {}) {
   ctx.tools.register({
     name: 'grep',
     description:
-      `Search file contents with a regular expression. Read-only and confined to the allowed directory (${displayRoot}). ` +
-      'Returns matches grouped by file as "Line N: <preview>". Arguments: pattern (required regex); path (optional directory); ' +
+      `Search file contents with a regular expression. Read-only and confined to ${scopeText}. ` +
+      `Returns matches grouped by file as "Line N: <preview>".${prefixNote} Arguments: pattern (required regex); path (optional directory); ` +
       'include (optional single positive glob such as "*.md").',
     parameters: {
       type: 'object',
@@ -390,8 +465,8 @@ export function apply(ctx, config = {}) {
       const groups = []
       let total = 0
       let capped = false
-      walk(jail, base.real, limits, (abs, real) => {
-        const rel = relative(jail.root, real).split(sep).join('/')
+      walk(base.entry, base.real, limits, (abs, real) => {
+        const rel = displayRel(base, real)
         if (include !== undefined && !matchGlob(include, rel)) return true
         let stat
         try { stat = statSync(real) } catch { return true }
