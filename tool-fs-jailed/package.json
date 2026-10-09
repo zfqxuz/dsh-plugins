@@ -1,0 +1,16 @@
+{
+  "name": "dsh-tool-fs-jailed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "DSH plugin: root-confined read-only filesystem tools (read/glob/grep) for untrusted read-only sessions.",
+  "keywords": ["dsh", "dsh-plugin", "filesystem", "jail", "read-only"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": ["index.js", "cordis.patch.yml", "README.md"]
+}
