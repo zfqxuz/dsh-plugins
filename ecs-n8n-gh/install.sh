@@ -11,6 +11,7 @@ DIR_NAME="dsh-ecs-n8n-gh"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DSH_HOME="${DSH_HOME:-${HOME:-/home/zfq}/.dsh}"
 DEST="$DSH_HOME/plugins/$DIR_NAME"
+if [ -L "$DEST" ] && [ "${FORCE:-0}" != "1" ]; then echo "install: $DEST is a symlink (link deployment); refusing to copy into the repo. Use FORCE=1 to override." >&2; exit 3; fi
 PATCH="$DSH_HOME/cordis.patch.yml"
 MARK_BEGIN="# >>> dsh-plugins: $PLUGIN_ID >>>"
 MARK_END="# <<< dsh-plugins: $PLUGIN_ID <<<"
