@@ -145,3 +145,31 @@ DSH_HOME=/path/to/dsh-home ./install.sh context-handoff
 - **为什么还要冻结旧会话**：client 切换是「尽力而为」的 UI 行为；如果用户在切换前继续在旧会话输入，冻结能保证旧会话不再重复干活。
 - **只用 Node 内置模块**：host 半通过绝对路径挂载，不保证能解析 `@deepseek-ai/*`，因此只 `import 'node:*'`；client 半手写为 `window.__ModuleLoader__.load(...)` 格式，不 `require` 任何外部模块。
 - **和自动压缩的关系**：DSH `compaction-basic` 默认在 80% 已用时压缩；本插件默认在 50% 已用时交接，先一步保住完整协作上下文。
+
+## 迁移契约（session-transfer，2026-10-09 新增）
+
+handoff 不再无条件自己建接续会话。触发时先广播 `context-handoff/requested`，等一个认领窗口
+（`claimWindowMs`，默认 2s），看有没有消费者愿意接手：
+
+- **有消费者认领**（例如 QQ 桥接）：由消费者**自己创建**接续会话（谁持有谁创建），插件只等
+  `context-handoff/committed`，然后做"冻结父会话"；`autoContinue` 由消费者决定，插件不再自跑。
+- **无人认领**（纯浏览器场景）：保持原行为 —— 插件自建 + autoContinue + 冻结，浏览器 client 半切 UI。
+- **只认领不提交**：记一条 aborted，直接失败，**不会再自建**（严格二选一，避免双开会话）。
+- `requireConsumer: true` 时无人认领就跳过交接（QQ 部署建议开启，等桥接侧认领上线后）。
+
+新增配置：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `claimWindowMs` | `2000` | 广播 requested 后等认领的窗口；0 = 关闭契约走旧路径 |
+| `claimCommitMs` | `15000` | 认领后等 committed 的超时 |
+| `requireConsumer` | `false` | 无人认领时是否拒绝自建 |
+| `excludePresets` | `[]` | 这些 agentPreset 的会话不参与交接（QQ guest 用 `qq-readonly`） |
+| `stateFile` | `''` | once/children 落盘路径；非空则宿主重启后不重复交接 |
+
+契约全文见 `docs/session-transfer.md`。已知缺口：浏览器 client 半目前只处理"插件自建"的子会话，
+消费者（QQ）自建的子会话不需要（也不应该）被浏览器抢过去。
+
+> **线上状态提示（dshbot）**：2026-10-09 曾临时把 `availableRatio` 压到 `0.01`、
+> 关闭 `freezeParent`/`freezeTools`/`autoContinue`，作为"桥接侧认领尚未上线"的止血；
+> 阶段 2 完成并通过 T3 后恢复 `0.5` + freeze。

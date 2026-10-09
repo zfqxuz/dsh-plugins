@@ -26,7 +26,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -69,6 +69,16 @@ const DEFAULTS = Object.freeze({
   cooldownMs: 30000,
   /** Log and report the decision without creating a session. */
   dryRun: false,
+  /** 迁移契约：发出 requested 后等待消费者认领的窗口（毫秒）。0 = 关闭契约，走旧路径。 */
+  claimWindowMs: 2000,
+  /** 迁移契约：消费者认领后等待其 committed 的超时（毫秒）。 */
+  claimCommitMs: 15000,
+  /** true = 无人认领时不自建会话（QQ 部署建议 true）。 */
+  requireConsumer: false,
+  /** 这些 agentPreset 的会话不参与交接（QQ guest 用 qq-readonly）。 */
+  excludePresets: [],
+  /** once/children 落盘路径；'' = 不落盘（保持进程内）。 */
+  stateFile: '',
   /** Model-facing tool name. */
   toolName: 'context_handoff',
   /** Human-facing slash command name (without the slash). */
@@ -141,9 +151,15 @@ function normalizeConfig(raw) {
   if (cfg.continueMode !== 'fresh' && cfg.continueMode !== 'seed') {
     throw new Error(`${PLUGIN_LABEL}: continueMode must be 'fresh' or 'seed'`)
   }
-  for (const key of ['autoContinue', 'digestIncludeToolCalls', 'notifyParent', 'freezeParent', 'freezeTools', 'once', 'includeSubagents', 'dryRun']) {
+  for (const key of ['autoContinue', 'digestIncludeToolCalls', 'notifyParent', 'freezeParent', 'freezeTools', 'once', 'includeSubagents', 'dryRun', 'requireConsumer']) {
     cfg[key] = cfg[key] === true
   }
+  cfg.claimWindowMs = Math.max(0, Math.trunc(clampNumber(cfg.claimWindowMs, DEFAULTS.claimWindowMs)))
+  cfg.claimCommitMs = Math.max(1000, Math.trunc(clampNumber(cfg.claimCommitMs, DEFAULTS.claimCommitMs)))
+  cfg.excludePresets = Array.isArray(cfg.excludePresets)
+    ? cfg.excludePresets.filter((value) => typeof value === 'string' && value !== '')
+    : []
+  cfg.stateFile = typeof cfg.stateFile === 'string' ? cfg.stateFile.trim() : ''
   cfg.toolName = typeof cfg.toolName === 'string' && cfg.toolName.trim() !== '' ? cfg.toolName.trim() : DEFAULTS.toolName
   cfg.commandName = typeof cfg.commandName === 'string' && cfg.commandName.trim() !== '' ? cfg.commandName.trim() : DEFAULTS.commandName
   return cfg
@@ -513,6 +529,97 @@ function buildParentNotice(childId, occ, cfg) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 迁移契约（session-transfer）：广播 / 认领 / 落盘                      */
+/* 契约细节见 docs/session-transfer.md                                  */
+/* ------------------------------------------------------------------ */
+
+const TRANSFER = Object.freeze({
+  requested: 'context-handoff/requested',
+  claimed: 'context-handoff/claimed',
+  committed: 'context-handoff/committed',
+  aborted: 'context-handoff/aborted',
+})
+
+/** 广播一个迁移事件；ctx 不支持 emit（如单测 mock）时返回 false，调用方退回旧路径。 */
+function emitTransfer(ctx, name, payload) {
+  if (typeof ctx?.emit !== 'function') return false
+  try {
+    ctx.emit(name, payload)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 等一个满足 predicate 的事件；超时 / ctx 不支持 on 时返回 undefined。 */
+function waitForTransfer(ctx, name, predicate, timeoutMs) {
+  if (typeof ctx?.on !== 'function' || !(timeoutMs > 0)) return Promise.resolve(undefined)
+  return new Promise((resolve) => {
+    let dispose
+    let timer
+    const finish = (value) => {
+      if (timer !== undefined) clearTimeout(timer)
+      try {
+        if (typeof dispose === 'function') dispose()
+      } catch {
+        /* 释放订阅失败不影响结果 */
+      }
+      resolve(value)
+    }
+    try {
+      dispose = ctx.on(name, (payload) => {
+        let matched = false
+        try {
+          matched = predicate(payload) === true
+        } catch {
+          matched = false
+        }
+        if (matched) finish(payload)
+      })
+    } catch {
+      finish(undefined)
+      return
+    }
+    timer = setTimeout(() => finish(undefined), timeoutMs)
+  })
+}
+
+/** 把 once/children 读回内存状态（文件不存在或损坏时静默跳过）。 */
+function loadTransferState(state, stateFile) {
+  if (stateFile === '') return
+  try {
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
+    if (Array.isArray(parsed?.handled)) {
+      for (const id of parsed.handled) if (typeof id === 'string' && id !== '') state.handled.add(id)
+    }
+    if (parsed?.children !== null && typeof parsed?.children === 'object') {
+      for (const [from, entry] of Object.entries(parsed.children)) {
+        if (entry !== null && typeof entry === 'object' && typeof entry.childSessionId === 'string') {
+          state.children.set(from, entry)
+        }
+      }
+    }
+  } catch {
+    /* 首次运行 / 文件损坏：忽略 */
+  }
+}
+
+/** 落盘 once/children；失败不影响交接本身。 */
+function saveTransferState(state, stateFile) {
+  if (stateFile === '') return
+  try {
+    const payload = {
+      savedAt: Date.now(),
+      handled: [...state.handled],
+      children: Object.fromEntries(state.children),
+    }
+    writeFileSync(stateFile, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
+  } catch {
+    /* 落盘失败不能影响交接 */
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* orchestration                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -612,6 +719,63 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
   if (parent === undefined) throw new Error(`${PLUGIN_LABEL}: live agent for session ${session.id} not found`)
 
   const digest = buildDigest(ctx, session, cfg)
+  const fromSessionId = session.header?.id ?? session.id
+
+  // 迁移契约（阶段 1）：先广播 requested，等消费者认领。
+  //   有认领 -> 消费者自建并接管（谁持有谁创建），插件只等 committed 然后冻结父会话；
+  //   无认领 -> 走原来的自建路径（纯浏览器场景）。
+  if (cfg.claimWindowMs > 0 && typeof ctx?.emit === 'function') {
+    // 两个订阅都必须在广播之前建好：消费者可能在同一个 tick 内回 claimed + committed。
+    const matchesFrom = (payload) => payload !== null && typeof payload === 'object' && payload.fromSessionId === fromSessionId
+    const claimPromise = waitForTransfer(ctx, TRANSFER.claimed, matchesFrom, cfg.claimWindowMs)
+    const commitPromise = waitForTransfer(ctx, TRANSFER.committed, matchesFrom, cfg.claimWindowMs + cfg.claimCommitMs)
+    const requested = emitTransfer(ctx, TRANSFER.requested, {
+      fromSessionId,
+      cwd: session.header?.cwd,
+      reason,
+      digest,
+      availableRatio: occ.availableRatio,
+      used: occ.used,
+      contextWindow: occ.contextWindow,
+      deadlineMs: cfg.claimWindowMs,
+    })
+    if (requested) {
+      const claim = await claimPromise
+      if (claim !== undefined) {
+        const committed = await commitPromise
+        if (committed === undefined || typeof committed.toSessionId !== 'string' || committed.toSessionId === '') {
+          emitTransfer(ctx, TRANSFER.aborted, { fromSessionId, by: 'plugin', error: 'consumer claimed but never committed' })
+          throw new Error(`${PLUGIN_LABEL}: consumer ${String(claim.by ?? '?')} claimed ${fromSessionId} but did not commit within ${cfg.claimCommitMs}ms`)
+        }
+        const claimed = {
+          at: Date.now(),
+          reason,
+          parentSessionId: fromSessionId,
+          childSessionId: committed.toSessionId,
+          workspacesId: undefined,
+          used: occ.used,
+          contextWindow: occ.contextWindow,
+          availableRatio: occ.availableRatio,
+          digestChars: digest.length,
+          autoContinue: false,
+          presetId: undefined,
+          method: 'consumer',
+          by: String(claim.by ?? 'unknown'),
+          freeze: freezeParent(ctx, parent, committed.toSessionId, cfg, state),
+        }
+        state.children.set(session.id, claimed)
+        record(state, 'triggers', claimed)
+        saveTransferState(state, cfg.stateFile)
+        safeLog(ctx, 'info', `${PLUGIN_LABEL}: ${fromSessionId} -> ${committed.toSessionId} (claimed by ${claimed.by})`)
+        return claimed
+      }
+      if (cfg.requireConsumer) {
+        record(state, 'skipped', { at: Date.now(), parentSessionId: fromSessionId, code: 'no-consumer', availableRatio: occ.availableRatio })
+        throw new Error(`${PLUGIN_LABEL}: no consumer claimed ${fromSessionId} and requireConsumer=true`)
+      }
+    }
+  }
+
   const childId = `session-${randomUUID()}`
   const presets = safeGet(ctx, 'agentPresets')
   const presetId =
@@ -684,6 +848,7 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
   }
   state.children.set(session.id, entry)
   record(state, 'triggers', entry)
+  saveTransferState(state, cfg.stateFile)
   safeLog(
     ctx,
     'info',
@@ -699,6 +864,11 @@ async function performHandoff(ctx, session, occ, cfg, state, reason) {
 async function maybeHandoff(ctx, session, cfg, state, options = {}) {
   const { force = false, recreate = false, reason = 'auto' } = options
   const occ = readOccupancy(ctx, session, cfg)
+  const presetId = session?.header?.agentPreset
+  if (cfg.excludePresets.length > 0 && typeof presetId === 'string' && cfg.excludePresets.includes(presetId)) {
+    record(state, 'skipped', { at: Date.now(), parentSessionId: session.id, code: 'excluded-preset', availableRatio: occ?.availableRatio })
+    return { ok: false, code: 'excluded-preset', occ, message: `agentPreset ${presetId} is excluded from handoff` }
+  }
   if (occ === undefined) {
     return { ok: false, code: 'unavailable', occ, message: 'context occupancy is unavailable: no contextPressure projection, tokenMeter, or contextWindow' }
   }
@@ -741,6 +911,7 @@ async function maybeHandoff(ctx, session, cfg, state, options = {}) {
     const entry = await operation
     if (cfg.once) state.handled.add(session.id)
     state.lastTriggerAt = Date.now()
+    saveTransferState(state, cfg.stateFile)
     return { ok: true, code: 'handed-off', occ, entry, message: `created continuation session ${entry.childSessionId}` }
   } catch (error) {
     safeLog(ctx, 'warn', `${PLUGIN_LABEL}: handoff for ${session.id} failed: ${String(error?.stack ?? error)}`)
@@ -833,6 +1004,7 @@ function okText(result) {
 export function apply(ctx, config = {}) {
   const cfg = normalizeConfig(config)
   const state = createState()
+  loadTransferState(state, cfg.stateFile)
 
   const boundaryType = cfg.checkOn === 'turn-end' ? 'turn/end' : 'step/end'
   const onBoundary = (session, event) => {
@@ -875,6 +1047,7 @@ export function apply(ctx, config = {}) {
   // Lift every frozen-parent registration when the plugin unloads.
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => {
+      saveTransferState(state, cfg.stateFile)
       for (const dispose of state.freezeDisposers.splice(0)) {
         try {
           dispose()
@@ -953,6 +1126,11 @@ export function apply(ctx, config = {}) {
  */
 export const internals = Object.freeze({
   DEFAULTS,
+  TRANSFER,
+  emitTransfer,
+  waitForTransfer,
+  loadTransferState,
+  saveTransferState,
   normalizeConfig,
   readOccupancy,
   shouldTrigger,
