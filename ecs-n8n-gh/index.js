@@ -111,7 +111,24 @@ function textTool(name, description, parameters, execute) {
 export function apply(ctx, config = {}) {
   const cfg = resolveConfig(config)
 
-  ctx.tools.register(textTool(
+  // ---- fail-soft：配置不全 = 这组工具"未启用"，而不是报错 ----
+  // 设计约定（zfq 2026-10-12）：ECS/GitHub 这些是"开发的人才会用"的能力，
+  // 出厂配置里全是空值；空值意味着工具不注册，插件本身加载正常、不抛错。
+  const ecsReady = cfg.ecsHost.trim() !== '' && cfg.sshKey.trim() !== ''
+  const ghReady = cfg.ghRepo.trim() !== ''
+  const skip = []
+  if (!ecsReady) skip.push('ecs_*/n8n_*（未配置 ecsHost 或 sshKey）')
+  if (!ghReady) skip.push('gh_*（未配置 ghRepo）')
+  if (skip.length > 0) {
+    console.log(`[ecs-n8n-gh] 未配置，跳过注册：${skip.join('、')}；在控制台"插件"页填入后重启宿主即可启用`)
+  }
+  const register = (group, tool) => {
+    if (group === 'ecs' && !ecsReady) return
+    if (group === 'gh' && !ghReady) return
+    ctx.tools.register(tool)
+  }
+
+  register('ecs', textTool(
     'ecs_exec',
     'Run a shell command on the configured ECS server over SSH. Use for docker compose, logs, health checks, and general ECS operations. Returns combined stdout/stderr and exit code.',
     {
@@ -130,7 +147,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('ecs', textTool(
     'ecs_status',
     'Show ECS hostname, Docker containers, and production compose status for the touhou-trpg deployment.',
     { type: 'object', additionalProperties: false, properties: {} },
@@ -147,7 +164,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('ecs', textTool(
     'ecs_upload',
     'Upload a local file to the configured ECS server via SCP. Useful for n8n workflow JSON, compose files, or scripts.',
     {
@@ -177,7 +194,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('ecs', textTool(
     'n8n_status',
     'Show n8n container status, health endpoint, recent logs, and active workflow activation state on ECS.',
     {
@@ -203,7 +220,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('ecs', textTool(
     'n8n_deploy_workflow',
     'Upload a local n8n workflow JSON to ECS and force-recreate the n8n container so the workflow is imported and published. Defaults to the repo n8n/workflows/module-import.json.',
     {
@@ -247,7 +264,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('gh', textTool(
     'gh_run_list',
     'List recent GitHub Actions runs for the configured repository using the gh CLI.',
     {
@@ -276,7 +293,7 @@ export function apply(ctx, config = {}) {
     }
   ))
 
-  ctx.tools.register(textTool(
+  register('gh', textTool(
     'gh_run_view',
     'View a GitHub Actions run by id. Set log_failed=true to return failed-step logs.',
     {

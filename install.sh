@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DSH_HOME="${DSH_HOME:-${HOME:-/home/zfq}/.dsh}"
+DSH_HOME="${DSH_HOME:-${HOME:?请先设置 HOME}/.dsh}"
 export DSH_HOME
 
 ids() {

@@ -6,7 +6,7 @@ set -euo pipefail
 PLUGIN_ID="session-reader"
 DIR_NAME="dsh-session-reader"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DSH_HOME="${DSH_HOME:-${HOME:-/home/zfq}/.dsh}"
+DSH_HOME="${DSH_HOME:-${HOME:?请先设置 HOME}/.dsh}"
 DEST="$DSH_HOME/plugins/$DIR_NAME"
 if [ -L "$DEST" ] && [ "${FORCE:-0}" != "1" ]; then echo "install: $DEST is a symlink (link deployment); refusing to copy into the repo. Use FORCE=1 to override." >&2; exit 3; fi
 PATCH="$DSH_HOME/cordis.patch.yml"

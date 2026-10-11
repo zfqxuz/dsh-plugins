@@ -9,7 +9,7 @@
 - 挂载配置：`~/.dsh/cordis.patch.yml`
   - `id: session-reader`
   - `name: ./plugins/dsh-session-reader/index.js`
-- 本仓库源码：`/home/zfq/runGroup/dsh-plugins/session-reader/`
+- 本仓库源码：本仓库的 `session-reader/` 目录
 
 `~/.dsh/cordis.patch.yml` 是 DSH 的 home-level user patch layer，
 会叠加到所有 profile；当前 `dsh web` 进程在 `patchReload: live` 下会自动重载。
